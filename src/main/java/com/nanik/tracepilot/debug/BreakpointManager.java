@@ -163,6 +163,8 @@ public class BreakpointManager {
         }
         breakpoints.clear();
         deferredBreakpoints.clear();
+        // Reset class prepare request so it gets re-created for the next VM
+        classPrepareRequest = null;
     }
 
     /**
