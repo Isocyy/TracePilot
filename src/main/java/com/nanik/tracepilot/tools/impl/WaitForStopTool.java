@@ -126,10 +126,12 @@ public class WaitForStopTool implements ToolHandler {
             sb.append("timeout_seconds: ").append(timeoutSeconds).append("\n\n");
             sb.append("Timeout waiting for VM to stop.\n");
             sb.append("The VM is still running. You can:\n");
-            sb.append("  - Call wait_for_stop again with a longer timeout\n");
+            sb.append("  - Call wait_for_stop again with a longer timeout (max: 300s)\n");
             sb.append("  - Call suspend() to manually pause the VM\n");
-            sb.append("  - Check if breakpoints are set correctly with breakpoint_list\n");
-            
+            sb.append("  - Check if breakpoints are set correctly with breakpoint_list\n\n");
+            sb.append("For Gradle tests: If the test times out, add to build.gradle:\n");
+            sb.append("  test { timeout = Duration.ofMinutes(30) }\n");
+
             return ToolResult.success(sb.toString());
         }
     }

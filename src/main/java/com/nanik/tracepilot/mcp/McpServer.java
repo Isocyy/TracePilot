@@ -109,6 +109,9 @@ public class McpServer {
 
         // Async Debugging Support
         toolRegistry.register(new WaitForStopTool());
+
+        // Convenience Tools
+        toolRegistry.register(new RunToLineTool());
     }
     
     /**
