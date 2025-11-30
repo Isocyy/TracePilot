@@ -8,12 +8,16 @@ import com.nanik.tracepilot.tools.ToolDefinition;
 import com.nanik.tracepilot.tools.ToolHandler;
 import com.nanik.tracepilot.tools.ToolResult;
 
+import java.io.BufferedReader;
 import java.io.File;
 import java.io.IOException;
+import java.io.InputStreamReader;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Tool to launch a Gradle test with debugging enabled and auto-attach.
@@ -33,8 +37,12 @@ public class DebugLaunchGradleTestTool implements ToolHandler {
     private static final int DEFAULT_DEBUG_PORT = 5005;
     private static final int DEFAULT_WAIT_TIMEOUT = 120; // Increased from 60 - Gradle can be slow
     private static final int PORT_CHECK_INTERVAL_MS = 500;
+    private static final int MAX_OUTPUT_LINES = 100; // Keep last N lines for error reporting
 
     private Process gradleProcess;
+    private Thread outputDrainThread;
+    private final ConcurrentLinkedQueue<String> outputLines = new ConcurrentLinkedQueue<>();
+    private final AtomicBoolean outputDrainRunning = new AtomicBoolean(false);
 
     @Override
     public ToolDefinition getDefinition() {
@@ -110,6 +118,9 @@ public class DebugLaunchGradleTestTool implements ToolHandler {
             pb.redirectErrorStream(true);
             gradleProcess = pb.start();
 
+            // Start output drain thread to prevent process from blocking
+            startOutputDrain(gradleProcess);
+
             sb.append("Gradle process started (PID: ").append(getProcessId(gradleProcess)).append(")\n");
             sb.append("Waiting for debug port ").append(port).append(" to become available (timeout: ").append(waitTimeout).append("s)...\n\n");
 
@@ -117,7 +128,8 @@ public class DebugLaunchGradleTestTool implements ToolHandler {
             boolean portReady = waitForDebugPort("localhost", port, waitTimeout, gradleProcess);
 
             if (!portReady) {
-                // Kill the process if port didn't become available
+                // Stop output drain and kill the process
+                stopOutputDrain();
                 gradleProcess.destroyForcibly();
 
                 // Provide helpful error message based on whether clean was used
@@ -132,7 +144,14 @@ public class DebugLaunchGradleTestTool implements ToolHandler {
                 errorMsg.append("Other possible causes:\n");
                 errorMsg.append("- Another process is using port ").append(port).append("\n");
                 errorMsg.append("- Gradle build failed (check gradleArgs='--info' for details)\n");
-                errorMsg.append("- Test filter doesn't match any tests\n");
+                errorMsg.append("- Test filter doesn't match any tests\n\n");
+
+                // Include last lines of Gradle output for debugging
+                String gradleOutput = getRecentOutput();
+                if (!gradleOutput.isEmpty()) {
+                    errorMsg.append("=== Last Gradle Output ===\n");
+                    errorMsg.append(gradleOutput);
+                }
 
                 return ToolResult.error(errorMsg.toString());
             }
@@ -246,6 +265,59 @@ public class DebugLaunchGradleTestTool implements ToolHandler {
         } catch (UnsupportedOperationException e) {
             return -1;
         }
+    }
+
+    /**
+     * Start a thread to drain process output to prevent blocking.
+     * Also captures output for error reporting.
+     */
+    private void startOutputDrain(Process process) {
+        outputLines.clear();
+        outputDrainRunning.set(true);
+
+        outputDrainThread = new Thread(() -> {
+            try (BufferedReader reader = new BufferedReader(
+                    new InputStreamReader(process.getInputStream()))) {
+                String line;
+                while (outputDrainRunning.get() && (line = reader.readLine()) != null) {
+                    outputLines.add(line);
+                    // Keep only last N lines to avoid memory issues
+                    while (outputLines.size() > MAX_OUTPUT_LINES) {
+                        outputLines.poll();
+                    }
+                }
+            } catch (IOException e) {
+                // Process closed or error - expected during shutdown
+            }
+        }, "gradle-output-drain");
+        outputDrainThread.setDaemon(true);
+        outputDrainThread.start();
+    }
+
+    /**
+     * Stop the output drain thread.
+     */
+    private void stopOutputDrain() {
+        outputDrainRunning.set(false);
+        if (outputDrainThread != null) {
+            outputDrainThread.interrupt();
+            try {
+                outputDrainThread.join(1000);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }
+    }
+
+    /**
+     * Get recent output lines for error reporting.
+     */
+    private String getRecentOutput() {
+        StringBuilder sb = new StringBuilder();
+        for (String line : outputLines) {
+            sb.append(line).append("\n");
+        }
+        return sb.toString();
     }
 
     /**
