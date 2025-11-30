@@ -121,6 +121,12 @@ public class McpServer {
 
         // Smart Stepping
         toolRegistry.register(new SmartStepIntoTool());
+
+        // Gradle Integration
+        toolRegistry.register(new DebugLaunchGradleTestTool());
+
+        // Async Debugging
+        toolRegistry.register(new AsyncStackTraceTool());
     }
     
     /**

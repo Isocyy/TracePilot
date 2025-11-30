@@ -1,0 +1,230 @@
+package com.nanik.tracepilot.tools.impl;
+
+import com.google.gson.JsonObject;
+import com.nanik.tracepilot.debug.DebugSession;
+import com.nanik.tracepilot.protocol.McpRequest;
+import com.nanik.tracepilot.tools.SchemaBuilder;
+import com.nanik.tracepilot.tools.ToolDefinition;
+import com.nanik.tracepilot.tools.ToolHandler;
+import com.nanik.tracepilot.tools.ToolResult;
+
+import java.io.File;
+import java.io.IOException;
+import java.net.InetSocketAddress;
+import java.net.Socket;
+import java.util.ArrayList;
+import java.util.List;
+
+/**
+ * Tool to launch a Gradle test with debugging enabled and auto-attach.
+ * 
+ * This tool:
+ * 1. Runs ./gradlew test --debug-jvm with the specified test filter
+ * 2. Waits for the debug port (5005) to become available
+ * 3. Automatically attaches the debugger
+ * 
+ * Solves the common problem of Gradle test timeouts during debugging.
+ */
+public class DebugLaunchGradleTestTool implements ToolHandler {
+
+    private static final int DEFAULT_DEBUG_PORT = 5005;
+    private static final int DEFAULT_WAIT_TIMEOUT = 60;
+    private static final int PORT_CHECK_INTERVAL_MS = 500;
+
+    private Process gradleProcess;
+
+    @Override
+    public ToolDefinition getDefinition() {
+        JsonObject schema = new SchemaBuilder()
+            .addString("projectDir", "Path to the Gradle project directory (default: current directory)", false)
+            .addString("testFilter", "Test filter (e.g., 'MyTest', '**/MyTest.java', '--tests MyClass.myMethod')", false)
+            .addInteger("port", "Debug port to use (default: 5005)", false)
+            .addInteger("waitTimeout", "Seconds to wait for debug port (default: 60)", false)
+            .addString("gradleArgs", "Additional Gradle arguments (e.g., '--info', '-Dspring.profiles.active=test')", false)
+            .addBoolean("useWrapper", "Use Gradle wrapper (./gradlew) instead of 'gradle' (default: true)", false)
+            .build();
+
+        return new ToolDefinition(
+            "debug_launch_gradle_test",
+            "Launch a Gradle test with debugging enabled and auto-attach. Runs './gradlew test --debug-jvm' and connects when ready.",
+            schema
+        );
+    }
+
+    @Override
+    public ToolResult execute(McpRequest request) {
+        DebugSession session = DebugSession.getInstance();
+
+        if (session.isConnected()) {
+            return ToolResult.error("Already connected to a VM. Use debug_disconnect first.");
+        }
+
+        // Parse parameters
+        String projectDir = request.getStringParam("projectDir");
+        String testFilter = request.getStringParam("testFilter");
+        Integer port = request.getIntParam("port");
+        Integer waitTimeout = request.getIntParam("waitTimeout");
+        String gradleArgs = request.getStringParam("gradleArgs");
+        Boolean useWrapper = request.getBoolParam("useWrapper");
+
+        if (port == null) port = DEFAULT_DEBUG_PORT;
+        if (waitTimeout == null) waitTimeout = DEFAULT_WAIT_TIMEOUT;
+        if (useWrapper == null) useWrapper = true;
+
+        File workDir = projectDir != null ? new File(projectDir) : new File(".");
+        if (!workDir.exists() || !workDir.isDirectory()) {
+            return ToolResult.error("Project directory does not exist: " + workDir.getAbsolutePath());
+        }
+
+        // Check for build.gradle
+        File buildGradle = new File(workDir, "build.gradle");
+        File buildGradleKts = new File(workDir, "build.gradle.kts");
+        if (!buildGradle.exists() && !buildGradleKts.exists()) {
+            return ToolResult.error("Not a Gradle project: no build.gradle or build.gradle.kts found in " + workDir.getAbsolutePath());
+        }
+
+        try {
+            // Build the Gradle command
+            List<String> command = buildGradleCommand(workDir, useWrapper, testFilter, gradleArgs);
+
+            StringBuilder sb = new StringBuilder();
+            sb.append("=== Launching Gradle Test with Debug ===\n\n");
+            sb.append("Command: ").append(String.join(" ", command)).append("\n");
+            sb.append("Working directory: ").append(workDir.getAbsolutePath()).append("\n");
+            sb.append("Debug port: ").append(port).append("\n\n");
+
+            // Launch Gradle process
+            ProcessBuilder pb = new ProcessBuilder(command);
+            pb.directory(workDir);
+            pb.redirectErrorStream(true);
+            gradleProcess = pb.start();
+
+            sb.append("Gradle process started (PID: ").append(getProcessId(gradleProcess)).append(")\n");
+            sb.append("Waiting for debug port ").append(port).append(" to become available...\n\n");
+
+            // Wait for debug port with output monitoring
+            boolean portReady = waitForDebugPort("localhost", port, waitTimeout, gradleProcess);
+
+            if (!portReady) {
+                // Kill the process if port didn't become available
+                gradleProcess.destroyForcibly();
+                return ToolResult.error(
+                    "Timeout waiting for debug port " + port + " after " + waitTimeout + " seconds.\n" +
+                    "Check if another process is using port " + port + " or if Gradle encountered an error.\n" +
+                    "Tip: Use '--info' in gradleArgs to see more details."
+                );
+            }
+
+            // Attach to the debug port
+            sb.append("Debug port available! Attaching debugger...\n\n");
+            session.attachSocket("localhost", port);
+            session.startEventThread();
+
+            sb.append("=== Connected Successfully ===\n");
+            sb.append("VM: ").append(session.getVm().name()).append("\n");
+            sb.append("Version: ").append(session.getVm().version()).append("\n\n");
+            sb.append("The test JVM is suspended. Set breakpoints and use 'resume' to start.\n");
+            sb.append("Use 'debug_disconnect' when done (this will also terminate the Gradle process).\n");
+
+            return ToolResult.success(sb.toString());
+
+        } catch (Exception e) {
+            if (gradleProcess != null) {
+                gradleProcess.destroyForcibly();
+            }
+            return ToolResult.error("Failed to launch Gradle test: " + e.getMessage());
+        }
+    }
+
+    private List<String> buildGradleCommand(File workDir, boolean useWrapper,
+                                             String testFilter, String gradleArgs) {
+        List<String> command = new ArrayList<>();
+
+        // Determine Gradle executable
+        if (useWrapper) {
+            File gradlew = new File(workDir, System.getProperty("os.name").toLowerCase().contains("win")
+                ? "gradlew.bat" : "gradlew");
+            if (gradlew.exists()) {
+                command.add(gradlew.getAbsolutePath());
+            } else {
+                command.add("gradle"); // Fallback to system Gradle
+            }
+        } else {
+            command.add("gradle");
+        }
+
+        // Add test task
+        command.add("test");
+
+        // Add debug-jvm flag
+        command.add("--debug-jvm");
+
+        // Add test filter if specified
+        if (testFilter != null && !testFilter.isEmpty()) {
+            if (!testFilter.startsWith("--tests")) {
+                command.add("--tests");
+            }
+            command.add(testFilter);
+        }
+
+        // Add additional Gradle arguments
+        if (gradleArgs != null && !gradleArgs.isEmpty()) {
+            for (String arg : gradleArgs.split("\\s+")) {
+                if (!arg.isEmpty()) {
+                    command.add(arg);
+                }
+            }
+        }
+
+        return command;
+    }
+
+    private boolean waitForDebugPort(String host, int port, int timeoutSeconds, Process process) {
+        long deadline = System.currentTimeMillis() + (timeoutSeconds * 1000L);
+
+        while (System.currentTimeMillis() < deadline) {
+            // Check if process is still running
+            if (!process.isAlive()) {
+                return false; // Process died
+            }
+
+            // Check if port is available
+            if (isPortOpen(host, port)) {
+                return true;
+            }
+
+            try {
+                Thread.sleep(PORT_CHECK_INTERVAL_MS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return false;
+            }
+        }
+
+        return false;
+    }
+
+    private boolean isPortOpen(String host, int port) {
+        try (Socket socket = new Socket()) {
+            socket.connect(new InetSocketAddress(host, port), 200);
+            return true;
+        } catch (IOException e) {
+            return false;
+        }
+    }
+
+    private long getProcessId(Process process) {
+        try {
+            return process.pid();
+        } catch (UnsupportedOperationException e) {
+            return -1;
+        }
+    }
+
+    /**
+     * Get the Gradle process for cleanup.
+     */
+    public Process getGradleProcess() {
+        return gradleProcess;
+    }
+}
