@@ -202,29 +202,80 @@ public class McpServer {
      */
     private void handleInitialize(McpRequest request) {
         if (initialized) {
-            rpcHandler.sendError(request.getId(), 
+            rpcHandler.sendError(request.getId(),
                 McpError.invalidRequest("Already initialized"));
             return;
         }
-        
+
         // Build response
         JsonObject result = new JsonObject();
         result.addProperty("protocolVersion", PROTOCOL_VERSION);
-        
+
         // Server info
         JsonObject serverInfo = new JsonObject();
         serverInfo.addProperty("name", SERVER_NAME);
         serverInfo.addProperty("version", SERVER_VERSION);
         result.add("serverInfo", serverInfo);
-        
+
         // Capabilities
         JsonObject capabilities = new JsonObject();
         JsonObject tools = new JsonObject();
         capabilities.add("tools", tools);
         result.add("capabilities", capabilities);
-        
+
+        // Instructions - guidance for LLM clients on how to use TracePilot effectively
+        result.addProperty("instructions", getServerInstructions());
+
         rpcHandler.sendSuccess(request.getId(), result);
         transport.log("Initialized with protocol version " + PROTOCOL_VERSION);
+    }
+
+    /**
+     * Get server instructions for LLM clients.
+     * These help avoid common pitfalls during Java debugging.
+     */
+    private String getServerInstructions() {
+        return String.join("\n",
+            "TracePilot - Java Debugger MCP Server",
+            "",
+            "=== COMMON ISSUES & SOLUTIONS ===",
+            "",
+            "1. GRADLE DEBUG PORT NOT OPENING",
+            "   If './gradlew test --debug-jvm' doesn't open port 5005:",
+            "   - Run './gradlew clean' first to clear cached test results",
+            "   - Gradle skips tests if nothing changed (including debug port setup)",
+            "   - Use: ./gradlew clean test --debug-jvm",
+            "",
+            "2. GRADLE TEST TIMEOUTS",
+            "   Debugging pauses test execution, causing timeout failures.",
+            "   Add to build.gradle: test { timeout = Duration.ofMinutes(30) }",
+            "",
+            "3. ATTACHING TO GRADLE TESTS",
+            "   Option A: Manual attach with port wait",
+            "     1. Run: ./gradlew test --debug-jvm --tests \"MyTest\"",
+            "     2. Use debug_attach_socket with waitForPort=true, waitTimeout=120",
+            "",
+            "   Option B: Use debug_launch_gradle_test (recommended)",
+            "     - Automatically runs Gradle, waits for port, and attaches",
+            "",
+            "4. MISSING DEBUG INFO (variables show '<not available>')",
+            "   Ensure code is compiled with debug symbols:",
+            "   - Gradle: tasks.withType(JavaCompile) { options.compilerArgs << '-g' }",
+            "   - Maven: <debug>true</debug> in compiler plugin",
+            "",
+            "5. BREAKPOINTS NOT HITTING",
+            "   - Verify class name is fully qualified (e.g., com.example.MyClass)",
+            "   - Check if code is actually executed (not skipped by test framework)",
+            "   - Use wait_for_stop after resume to detect when stopped",
+            "",
+            "=== DEBUGGING WORKFLOW ===",
+            "1. Attach: debug_attach_socket or debug_launch_gradle_test",
+            "2. Set breakpoints: breakpoint_set",
+            "3. Resume: resume, then wait_for_stop",
+            "4. Inspect: variables_local, stack_frames, evaluate_expression",
+            "5. Navigate: step_over, step_into, step_out, run_to_line",
+            "6. Cleanup: debug_disconnect"
+        );
     }
     
     /**

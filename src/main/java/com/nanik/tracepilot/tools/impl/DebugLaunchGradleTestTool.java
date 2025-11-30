@@ -17,18 +17,21 @@ import java.util.List;
 
 /**
  * Tool to launch a Gradle test with debugging enabled and auto-attach.
- * 
+ *
  * This tool:
  * 1. Runs ./gradlew test --debug-jvm with the specified test filter
  * 2. Waits for the debug port (5005) to become available
  * 3. Automatically attaches the debugger
- * 
+ *
  * Solves the common problem of Gradle test timeouts during debugging.
+ *
+ * IMPORTANT: If Gradle caches test results, it skips tests entirely and
+ * never opens the debug port. Use clean=true to force a fresh run.
  */
 public class DebugLaunchGradleTestTool implements ToolHandler {
 
     private static final int DEFAULT_DEBUG_PORT = 5005;
-    private static final int DEFAULT_WAIT_TIMEOUT = 60;
+    private static final int DEFAULT_WAIT_TIMEOUT = 120; // Increased from 60 - Gradle can be slow
     private static final int PORT_CHECK_INTERVAL_MS = 500;
 
     private Process gradleProcess;
@@ -39,14 +42,16 @@ public class DebugLaunchGradleTestTool implements ToolHandler {
             .addString("projectDir", "Path to the Gradle project directory (default: current directory)", false)
             .addString("testFilter", "Test filter (e.g., 'MyTest', '**/MyTest.java', '--tests MyClass.myMethod')", false)
             .addInteger("port", "Debug port to use (default: 5005)", false)
-            .addInteger("waitTimeout", "Seconds to wait for debug port (default: 60)", false)
+            .addInteger("waitTimeout", "Seconds to wait for debug port (default: 120)", false)
             .addString("gradleArgs", "Additional Gradle arguments (e.g., '--info', '-Dspring.profiles.active=test')", false)
             .addBoolean("useWrapper", "Use Gradle wrapper (./gradlew) instead of 'gradle' (default: true)", false)
+            .addBoolean("clean", "Run 'clean' before test to force fresh test run (RECOMMENDED - cached tests skip debug port opening)", false)
             .build();
 
         return new ToolDefinition(
             "debug_launch_gradle_test",
-            "Launch a Gradle test with debugging enabled and auto-attach. Runs './gradlew test --debug-jvm' and connects when ready.",
+            "Launch a Gradle test with debugging enabled and auto-attach. Runs './gradlew test --debug-jvm' and connects when ready. " +
+            "IMPORTANT: Use clean=true if tests are cached (Gradle skips cached tests and never opens debug port).",
             schema
         );
     }
@@ -66,10 +71,12 @@ public class DebugLaunchGradleTestTool implements ToolHandler {
         Integer waitTimeout = request.getIntParam("waitTimeout");
         String gradleArgs = request.getStringParam("gradleArgs");
         Boolean useWrapper = request.getBoolParam("useWrapper");
+        Boolean clean = request.getBoolParam("clean");
 
         if (port == null) port = DEFAULT_DEBUG_PORT;
         if (waitTimeout == null) waitTimeout = DEFAULT_WAIT_TIMEOUT;
         if (useWrapper == null) useWrapper = true;
+        if (clean == null) clean = false;
 
         File workDir = projectDir != null ? new File(projectDir) : new File(".");
         if (!workDir.exists() || !workDir.isDirectory()) {
@@ -85,13 +92,17 @@ public class DebugLaunchGradleTestTool implements ToolHandler {
 
         try {
             // Build the Gradle command
-            List<String> command = buildGradleCommand(workDir, useWrapper, testFilter, gradleArgs);
+            List<String> command = buildGradleCommand(workDir, useWrapper, clean, testFilter, gradleArgs);
 
             StringBuilder sb = new StringBuilder();
             sb.append("=== Launching Gradle Test with Debug ===\n\n");
             sb.append("Command: ").append(String.join(" ", command)).append("\n");
             sb.append("Working directory: ").append(workDir.getAbsolutePath()).append("\n");
-            sb.append("Debug port: ").append(port).append("\n\n");
+            sb.append("Debug port: ").append(port).append("\n");
+            if (clean) {
+                sb.append("Clean build: YES (forces fresh test run)\n");
+            }
+            sb.append("\n");
 
             // Launch Gradle process
             ProcessBuilder pb = new ProcessBuilder(command);
@@ -100,7 +111,7 @@ public class DebugLaunchGradleTestTool implements ToolHandler {
             gradleProcess = pb.start();
 
             sb.append("Gradle process started (PID: ").append(getProcessId(gradleProcess)).append(")\n");
-            sb.append("Waiting for debug port ").append(port).append(" to become available...\n\n");
+            sb.append("Waiting for debug port ").append(port).append(" to become available (timeout: ").append(waitTimeout).append("s)...\n\n");
 
             // Wait for debug port with output monitoring
             boolean portReady = waitForDebugPort("localhost", port, waitTimeout, gradleProcess);
@@ -108,11 +119,22 @@ public class DebugLaunchGradleTestTool implements ToolHandler {
             if (!portReady) {
                 // Kill the process if port didn't become available
                 gradleProcess.destroyForcibly();
-                return ToolResult.error(
-                    "Timeout waiting for debug port " + port + " after " + waitTimeout + " seconds.\n" +
-                    "Check if another process is using port " + port + " or if Gradle encountered an error.\n" +
-                    "Tip: Use '--info' in gradleArgs to see more details."
-                );
+
+                // Provide helpful error message based on whether clean was used
+                StringBuilder errorMsg = new StringBuilder();
+                errorMsg.append("Timeout waiting for debug port ").append(port).append(" after ").append(waitTimeout).append(" seconds.\n\n");
+
+                if (!clean) {
+                    errorMsg.append("LIKELY CAUSE: Gradle skipped tests because results are cached.\n");
+                    errorMsg.append("SOLUTION: Retry with clean=true to force fresh test run.\n\n");
+                }
+
+                errorMsg.append("Other possible causes:\n");
+                errorMsg.append("- Another process is using port ").append(port).append("\n");
+                errorMsg.append("- Gradle build failed (check gradleArgs='--info' for details)\n");
+                errorMsg.append("- Test filter doesn't match any tests\n");
+
+                return ToolResult.error(errorMsg.toString());
             }
 
             // Attach to the debug port
@@ -136,7 +158,7 @@ public class DebugLaunchGradleTestTool implements ToolHandler {
         }
     }
 
-    private List<String> buildGradleCommand(File workDir, boolean useWrapper,
+    private List<String> buildGradleCommand(File workDir, boolean useWrapper, boolean clean,
                                              String testFilter, String gradleArgs) {
         List<String> command = new ArrayList<>();
 
@@ -151,6 +173,11 @@ public class DebugLaunchGradleTestTool implements ToolHandler {
             }
         } else {
             command.add("gradle");
+        }
+
+        // Add clean task if requested (IMPORTANT: clears cached test results)
+        if (clean) {
+            command.add("clean");
         }
 
         // Add test task
