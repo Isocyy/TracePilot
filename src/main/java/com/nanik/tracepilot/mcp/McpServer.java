@@ -112,6 +112,15 @@ public class McpServer {
 
         // Convenience Tools
         toolRegistry.register(new RunToLineTool());
+
+        // Watch Expressions
+        toolRegistry.register(new WatchAddTool());
+        toolRegistry.register(new WatchListTool());
+        toolRegistry.register(new WatchRemoveTool());
+        toolRegistry.register(new WatchEvaluateAllTool());
+
+        // Smart Stepping
+        toolRegistry.register(new SmartStepIntoTool());
     }
     
     /**
