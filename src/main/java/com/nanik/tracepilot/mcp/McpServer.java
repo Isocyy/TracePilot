@@ -44,7 +44,7 @@ public class McpServer {
         toolRegistry.register(new PingTool());
 
         // Phase 2: VM Connection tools
-        toolRegistry.register(new DebugLaunchTool());
+//        toolRegistry.register(new DebugLaunchTool());
         toolRegistry.register(new DebugAttachSocketTool());
         toolRegistry.register(new DebugAttachPidTool());
         toolRegistry.register(new DebugDisconnectTool());
@@ -123,7 +123,7 @@ public class McpServer {
         toolRegistry.register(new SmartStepIntoTool());
 
         // Gradle Integration
-        toolRegistry.register(new DebugLaunchGradleTestTool());
+//        toolRegistry.register(new DebugLaunchGradleTestTool());
 
         // Async Debugging
         toolRegistry.register(new AsyncStackTraceTool());
